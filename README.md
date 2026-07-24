@@ -1,4 +1,4 @@
-# Smart Door — Intrusion Detection System (Streamlit)
+# Smart Door — Intrusion Detection System 
 
 A face-recognition based smart door system with a web UI:
 
