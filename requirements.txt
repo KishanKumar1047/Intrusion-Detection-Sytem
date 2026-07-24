@@ -1,7 +1,7 @@
 streamlit
-streamlit-webrtc
+streamlit-webrtc==0.47.1
+av==11.0.0
 opencv-python-headless
 face_recognition
 numpy
 pillow
-av

@@ -2,3 +2,12 @@ cmake
 build-essential
 libopenblas-dev
 liblapack-dev
+ffmpeg
+libavformat-dev
+libavcodec-dev
+libavdevice-dev
+libavutil-dev
+libswscale-dev
+libswresample-dev
+libavfilter-dev
+pkg-config
