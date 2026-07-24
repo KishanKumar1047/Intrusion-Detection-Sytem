@@ -11,15 +11,11 @@ Run locally with:
     streamlit run streamlit_app.py
 """
 
-import threading
-
-import av
 import cv2
 import numpy as np
 import streamlit as st
 import face_recognition
 from PIL import Image
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 from utils.face_db import load_database, save_database
 
@@ -42,51 +38,36 @@ def build_known_list(db):
     return names, encs
 
 
-class FaceRecognitionProcessor(VideoProcessorBase):
-    """Receives each webcam frame, runs face recognition, and draws
-    bounding boxes + labels directly on the frame before it's displayed."""
+def run_detection_on_frame(image_np, known_names, known_encs):
+    """Runs face detection + recognition on a single RGB image (numpy array).
+    Draws bounding boxes/labels and returns the annotated RGB image plus a
+    list of (name, label) results."""
+    img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
 
-    def __init__(self):
-        db = load_database()
-        self.known_names, self.known_encs = build_known_list(db)
-        self.lock = threading.Lock()
-        self.last_status = "Scanning..."
+    face_locations = face_recognition.face_locations(image_np)
+    face_encodings = face_recognition.face_encodings(image_np, face_locations)
 
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
+    results = []
 
-        # Downscale for faster processing
-        small = cv2.resize(img, (0, 0), fx=0.25, fy=0.25)
-        rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    for (top, right, bottom, left), face_enc in zip(face_locations, face_encodings):
+        name = "Unknown"
+        if known_encs:
+            distances = face_recognition.face_distance(known_encs, face_enc)
+            best_idx = int(np.argmin(distances))
+            if distances[best_idx] <= TOLERANCE:
+                name = known_names[best_idx]
 
-        face_locations = face_recognition.face_locations(rgb_small)
-        face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+        cv2.rectangle(img_bgr, (left, top), (right, bottom), color, 2)
+        label = "Entry Permitted" if name != "Unknown" else "Unknown - Alert"
+        cv2.putText(
+            img_bgr, f"{name}: {label}", (left, max(top - 10, 10)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
+        )
+        results.append((name, label))
 
-        status_texts = []
-
-        for (top, right, bottom, left), face_enc in zip(face_locations, face_encodings):
-            name = "Unknown"
-            if self.known_encs:
-                distances = face_recognition.face_distance(self.known_encs, face_enc)
-                best_idx = int(np.argmin(distances))
-                if distances[best_idx] <= TOLERANCE:
-                    name = self.known_names[best_idx]
-
-            # scale coordinates back up to the original frame size
-            top, right, bottom, left = top * 4, right * 4, bottom * 4, left * 4
-            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-            cv2.rectangle(img, (left, top), (right, bottom), color, 2)
-            label = "Entry Permitted" if name != "Unknown" else "Unknown - Alert"
-            cv2.putText(
-                img, f"{name}: {label}", (left, max(top - 10, 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
-            )
-            status_texts.append(f"{name}: {label}")
-
-        with self.lock:
-            self.last_status = "; ".join(status_texts) if status_texts else "No face detected"
-
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    return img_rgb, results
 
 
 # ---------------------------------------------------------------------------
@@ -108,23 +89,33 @@ st.sidebar.metric("Registered People", len(db_preview))
 # Page: Live Detection
 # ---------------------------------------------------------------------------
 if page == "Live Detection":
-    st.title("🚪 Smart Door — Live Intrusion Detection")
+    st.title("Smart Door - Live Intrusion Detection")
     st.write(
-        "The camera feed below continuously scans for faces. "
-        "**Green box** = recognized person (Entry Permitted). "
-        "**Red box** = unknown person (Alert)."
+        "The camera preview below is live. Click 'Take Photo' whenever someone "
+        "is at the door to scan them. Green box = recognized person (Entry "
+        "Permitted). Red box = unknown person (Alert)."
     )
 
-    webrtc_streamer(
-        key="door-detection",
-        video_processor_factory=FaceRecognitionProcessor,
-        media_stream_constraints={"video": True, "audio": False},
-    )
+    db = load_database()
+    known_names, known_encs = build_known_list(db)
 
-    st.info(
-        "Tip: If you just registered or deleted a face, click **Start** again "
-        "(or refresh the page) so the detector picks up the latest database."
-    )
+    frame = st.camera_input("Door Camera")
+
+    if frame is not None:
+        image = Image.open(frame)
+        image_np = np.array(image.convert("RGB"))
+        annotated_rgb, results = run_detection_on_frame(image_np, known_names, known_encs)
+
+        st.image(annotated_rgb, caption="Detection Result", use_container_width=True)
+
+        if not results:
+            st.warning("No face detected in the frame.")
+        else:
+            for name, label in results:
+                if name != "Unknown":
+                    st.success(f"Recognized - {name}: {label}")
+                else:
+                    st.error(f"Alert - {name}: {label}")
 
 
 # ---------------------------------------------------------------------------
