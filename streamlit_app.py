@@ -5,19 +5,26 @@ Smart Door - Intrusion Detection System (Streamlit Web App)
 
 Layout:
   - Left sidebar : navigation (Live Detection / Registered Faces / Add New Face / Delete Face)
-  - Right side    : live camera feed with face detection (on the Live Detection page)
+  - Right side    : continuous live camera feed with real-time face detection
 
-Uses OpenCV's built-in YuNet (detection) + SFace (recognition) models -
-no dlib, no C++ compiling, so this deploys cleanly on Streamlit Cloud.
+Uses OpenCV's built-in YuNet (detection) + SFace (recognition) models for
+recognition - no dlib, no C++ compiling. Uses streamlit-webrtc + av for the
+continuous live video stream - both install from prebuilt wheels (av bundles
+FFmpeg statically), so nothing here needs to compile from source. This
+combination deploys cleanly on Streamlit Cloud.
 
 Run locally with:
     streamlit run streamlit_app.py
 """
 
+import threading
+
+import av
 import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 from utils.face_db import load_database, save_database
 from utils.face_engine import FaceEngine, MATCH_THRESHOLD
@@ -61,14 +68,12 @@ def best_match(engine, feature, known_names, known_encs):
     return best_name, best_score
 
 
-def run_detection_on_frame(engine, image_np, known_names, known_encs):
-    """Runs face detection + recognition on a single RGB image (numpy array).
-    Draws bounding boxes/labels and returns the annotated RGB image plus a
-    list of (name, label) results."""
-    img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+def annotate_frame(engine, img_bgr, known_names, known_encs):
+    """Runs detection + recognition on a BGR frame and draws boxes/labels
+    directly onto it. Returns the annotated frame plus a list of results."""
     faces = engine.detect_faces(img_bgr)
-
     results = []
+
     for face_row in faces:
         x, y, w, h = face_row[0:4].astype(int)
         feature = engine.get_encoding(img_bgr, face_row)
@@ -83,8 +88,7 @@ def run_detection_on_frame(engine, image_np, known_names, known_encs):
         )
         results.append((name, label))
 
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    return img_rgb, results
+    return img_bgr, results
 
 
 def encode_uploaded_image(engine, pil_image):
@@ -96,6 +100,25 @@ def encode_uploaded_image(engine, pil_image):
     if len(faces) == 0:
         return None
     return engine.get_encoding(img_bgr, faces[0])
+
+
+class DoorVideoProcessor(VideoProcessorBase):
+    """Receives each live webcam frame from streamlit-webrtc and draws
+    recognition results directly onto it in real time."""
+
+    def __init__(self, engine, known_names, known_encs):
+        self.engine = engine
+        self.known_names = known_names
+        self.known_encs = known_encs
+        self.lock = threading.Lock()
+        self.last_results = []
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        annotated, results = annotate_frame(self.engine, img, self.known_names, self.known_encs)
+        with self.lock:
+            self.last_results = results
+        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
 
 # ---------------------------------------------------------------------------
@@ -121,31 +144,26 @@ engine = get_engine()
 if page == "Live Detection":
     st.title("Smart Door - Live Intrusion Detection")
     st.write(
-        "The camera preview below is live. Click 'Take Photo' whenever someone "
-        "is at the door to scan them. Green box = recognized person (Entry "
-        "Permitted). Red box = unknown person (Alert)."
+        "The feed below continuously scans for faces. Green box = recognized "
+        "person (Entry Permitted). Red box = unknown person (Alert)."
     )
 
     db = load_database()
     known_names, known_encs = build_known_list(db)
 
-    frame = st.camera_input("Door Camera")
+    if not db:
+        st.warning("No faces registered yet. Go to 'Add New Face' first, so the detector has someone to recognize.")
 
-    if frame is not None:
-        image = Image.open(frame)
-        image_np = np.array(image.convert("RGB"))
-        annotated_rgb, results = run_detection_on_frame(engine, image_np, known_names, known_encs)
+    ctx = webrtc_streamer(
+        key="door-detection",
+        video_processor_factory=lambda: DoorVideoProcessor(engine, known_names, known_encs),
+        media_stream_constraints={"video": True, "audio": False},
+    )
 
-        st.image(annotated_rgb, caption="Detection Result", use_container_width=True)
-
-        if not results:
-            st.warning("No face detected in the frame.")
-        else:
-            for name, label in results:
-                if name != "Unknown":
-                    st.success(f"Recognized - {name}: {label}")
-                else:
-                    st.error(f"Alert - {name}: {label}")
+    st.info(
+        "If you just registered or deleted a face, click 'Stop' then 'Start' "
+        "again (or refresh the page) so the detector picks up the latest database."
+    )
 
 
 # ---------------------------------------------------------------------------
