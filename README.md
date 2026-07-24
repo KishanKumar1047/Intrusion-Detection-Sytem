@@ -3,77 +3,92 @@
 A face-recognition based smart door system with a web UI:
 
 - **Left sidebar** — navigate between Live Detection, Registered Faces, Add New Face, Delete Face
-- **Right side** — live camera feed with real-time face detection (on the Live Detection page)
+- **Right side / main area** — live camera feed with face detection (on the Live Detection page)
 - Recognized face → green box, "Entry Permitted"
 - Unknown face → red box, "Alert"
 
-## 📁 File Structure
+## Why this version has no `dlib`
+
+Earlier versions used the `face_recognition` library, which depends on `dlib` — a
+C++ library that must be **compiled from source** on most cloud platforms
+(Streamlit Cloud, Render, etc.). That build is memory-heavy and fails
+unpredictably on free-tier hosting (out-of-memory kills, missing build tools,
+Python-version mismatches).
+
+This version instead uses **OpenCV's own built-in face models**:
+- **YuNet** — face detection
+- **SFace** — face recognition (turns a face into a 128-d vector, same idea as before)
+
+Both ship as small ONNX files that OpenCV's DNN module loads directly.
+**No C++ compiler, no cmake, no build tools, no `dlib` — anywhere.** This is
+what makes the app reliably deployable on Streamlit Community Cloud (or Render,
+or any other host) without native-build failures.
+
+The two model files (~35 MB total) are downloaded automatically and cached to
+disk the first time the app runs (see `utils/face_engine.py`). This needs an
+internet connection on first run only — normal for any cloud deployment.
+
+> **Note:** Because the recognition engine changed, any faces registered with
+> the *old* `dlib`-based version are **not** compatible with this version.
+> Simply register everyone again using **Add New Face** — it takes a few
+> seconds per person.
+
+## File Structure
 
 ```
 smart_door_streamlit/
-├── streamlit_app.py      # Main app: sidebar navigation + live detection
+├── streamlit_app.py      # Main app: sidebar navigation + detection pages
 ├── utils/
-│   └── face_db.py        # Load/save the face-encodings database
-├── data/
-│   └── encodings.pkl     # Auto-generated - stores all registered face encodings
-├── requirements.txt       # Python dependencies
-├── packages.txt           # System packages (needed to build dlib on Streamlit Cloud)
-└── runtime.txt            # Pins Python version for Streamlit Cloud
+│   ├── face_db.py        # Load / save the face-encodings database
+│   └── face_engine.py    # YuNet + SFace wrapper (detection, encoding, matching)
+├── requirements.txt       # Python dependencies (just streamlit, opencv, numpy, pillow)
+├── runtime.txt             # Pins the Python version for Streamlit Cloud
+└── data/
+    └── encodings.pkl      # Auto-generated - stores all registered face encodings
 ```
 
-## ⚙️ Run Locally
+(A `models/` folder is created automatically on first run to cache the
+downloaded ONNX files — you don't need to create it yourself.)
 
-1. Install Python 3.10 or 3.11 (recommended — newer versions can hit `dlib`/`setuptools`
-   build issues, as you've already seen).
+## Run Locally
 
-2. Install dependencies:
+1. Install dependencies:
    ```
    pip install -r requirements.txt
    ```
+   (No dlib, no build tools needed — this should install cleanly on any
+   Python 3.9+ environment.)
 
-   > `face_recognition` depends on `dlib`, which needs a C++ compiler to build from
-   > source. On Windows, either:
-   > - Install a precompiled wheel from https://github.com/z-mahmud22/Dlib_Windows_Python3.x
-   >   matching your Python version, **or**
-   > - Install CMake + Visual Studio Build Tools ("Desktop development with C++")
-
-3. Run the app:
+2. Run the app:
    ```
    streamlit run streamlit_app.py
    ```
-   This opens the app in your browser (usually at `http://localhost:8501`). Your
-   browser will ask for camera permission on the Live Detection page.
+   This opens the app in your browser (usually at `http://localhost:8501`).
+   The first time you visit the app, it downloads the two model files
+   (~35 MB) — you'll see a "Loading face recognition models..." spinner
+   once, then it's cached for future runs.
 
-## 🚀 Deploy to Streamlit Community Cloud (free)
+## Deploy to Streamlit Community Cloud (free)
 
 1. Push this project to a **public GitHub repository**.
 2. Go to https://share.streamlit.io and sign in with GitHub.
-3. Click **"New app"**, select your repo, branch, and set the main file to
+3. Click **"New app"**, select your repo/branch, and set the main file to
    `streamlit_app.py`.
-4. Streamlit Cloud will automatically:
-   - Use `runtime.txt` to pick the Python version
-   - Install OS packages from `packages.txt` (needed to compile `dlib`)
-   - Install Python packages from `requirements.txt`
-5. Click **Deploy**. First build can take 5-10 minutes since `dlib` compiles from source.
+4. Click **Deploy**. Since there's no native build step anymore, this should
+   complete in under a minute.
 
-> Note: On Streamlit Community Cloud, the live camera feed uses the **viewer's own
-> webcam** (via their browser, through `streamlit-webrtc`) — not a server-side camera.
-> This is the correct setup for a demo/dashboard; for an actual physical door, you'd
-> run this on a device with a camera attached (e.g. a Raspberry Pi) instead.
-
-## 🧭 How to Use
+## How to Use
 
 1. **Add New Face** — enter a name, then either take a photo with your webcam or
    upload a few images (3-5 samples from different angles improves accuracy).
 2. **Registered Faces** — see everyone currently registered and how many samples
    each person has.
 3. **Delete Face** — remove a person from the database.
-4. **Live Detection** — starts the webcam feed; faces are boxed and labeled in
-   real time as either recognized ("Entry Permitted") or unknown ("Alert").
+4. **Live Detection** — camera preview is live; click "Take Photo" whenever
+   someone is at the door. Recognized → green box + "Entry Permitted".
+   Unknown → red box + "Alert".
 
-## 🔧 Tuning
+## Tuning
 
-- `TOLERANCE` in `streamlit_app.py` (default `0.50`) controls matching strictness.
-  Lower = stricter (fewer false positives), higher = looser.
-- If you add or delete a face while the Live Detection page is already running,
-  click **Start** again (or refresh the page) so the new database is loaded.
+- `MATCH_THRESHOLD` in `utils/face_engine.py` (default `0.363`, OpenCV's
+  recommended value for SFace) controls matching strictness. Higher = stricter.

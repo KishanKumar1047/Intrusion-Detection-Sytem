@@ -5,7 +5,10 @@ Smart Door - Intrusion Detection System (Streamlit Web App)
 
 Layout:
   - Left sidebar : navigation (Live Detection / Registered Faces / Add New Face / Delete Face)
-  - Right side    : live camera feed with real-time face detection (on the Live Detection page)
+  - Right side    : live camera feed with face detection (on the Live Detection page)
+
+Uses OpenCV's built-in YuNet (detection) + SFace (recognition) models -
+no dlib, no C++ compiling, so this deploys cleanly on Streamlit Cloud.
 
 Run locally with:
     streamlit run streamlit_app.py
@@ -14,14 +17,20 @@ Run locally with:
 import cv2
 import numpy as np
 import streamlit as st
-import face_recognition
 from PIL import Image
 
 from utils.face_db import load_database, save_database
-
-TOLERANCE = 0.50  # lower = stricter matching (0.4-0.6 is a reasonable range)
+from utils.face_engine import FaceEngine, MATCH_THRESHOLD
 
 st.set_page_config(page_title="Smart Door - Intrusion Detection", layout="wide")
+
+
+# ---------------------------------------------------------------------------
+# Cached engine loader - downloads/loads the models only once per session
+# ---------------------------------------------------------------------------
+@st.cache_resource(show_spinner="Loading face recognition models (first run only)...")
+def get_engine():
+    return FaceEngine()
 
 
 # ---------------------------------------------------------------------------
@@ -38,36 +47,55 @@ def build_known_list(db):
     return names, encs
 
 
-def run_detection_on_frame(image_np, known_names, known_encs):
+def best_match(engine, feature, known_names, known_encs):
+    """Compares one face's feature vector against every stored encoding.
+    Returns (name, score). name is 'Unknown' if nothing clears the threshold."""
+    best_name = "Unknown"
+    best_score = -1.0
+    for name, enc in zip(known_names, known_encs):
+        score = engine.compare(feature, enc)
+        if score > best_score:
+            best_score = score
+            if score >= MATCH_THRESHOLD:
+                best_name = name
+    return best_name, best_score
+
+
+def run_detection_on_frame(engine, image_np, known_names, known_encs):
     """Runs face detection + recognition on a single RGB image (numpy array).
     Draws bounding boxes/labels and returns the annotated RGB image plus a
     list of (name, label) results."""
     img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-
-    face_locations = face_recognition.face_locations(image_np)
-    face_encodings = face_recognition.face_encodings(image_np, face_locations)
+    faces = engine.detect_faces(img_bgr)
 
     results = []
-
-    for (top, right, bottom, left), face_enc in zip(face_locations, face_encodings):
-        name = "Unknown"
-        if known_encs:
-            distances = face_recognition.face_distance(known_encs, face_enc)
-            best_idx = int(np.argmin(distances))
-            if distances[best_idx] <= TOLERANCE:
-                name = known_names[best_idx]
+    for face_row in faces:
+        x, y, w, h = face_row[0:4].astype(int)
+        feature = engine.get_encoding(img_bgr, face_row)
+        name, score = best_match(engine, feature, known_names, known_encs)
 
         color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-        cv2.rectangle(img_bgr, (left, top), (right, bottom), color, 2)
+        cv2.rectangle(img_bgr, (x, y), (x + w, y + h), color, 2)
         label = "Entry Permitted" if name != "Unknown" else "Unknown - Alert"
         cv2.putText(
-            img_bgr, f"{name}: {label}", (left, max(top - 10, 10)),
+            img_bgr, f"{name}: {label}", (x, max(y - 10, 10)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
         )
         results.append((name, label))
 
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     return img_rgb, results
+
+
+def encode_uploaded_image(engine, pil_image):
+    """Detects the first face in a PIL image and returns its feature vector,
+    or None if no face was found."""
+    image_np = np.array(pil_image.convert("RGB"))
+    img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    faces = engine.detect_faces(img_bgr)
+    if len(faces) == 0:
+        return None
+    return engine.get_encoding(img_bgr, faces[0])
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +111,8 @@ st.sidebar.caption("Face Recognition Intrusion Detection System")
 
 db_preview = load_database()
 st.sidebar.metric("Registered People", len(db_preview))
+
+engine = get_engine()
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +134,7 @@ if page == "Live Detection":
     if frame is not None:
         image = Image.open(frame)
         image_np = np.array(image.convert("RGB"))
-        annotated_rgb, results = run_detection_on_frame(image_np, known_names, known_encs)
+        annotated_rgb, results = run_detection_on_frame(engine, image_np, known_names, known_encs)
 
         st.image(annotated_rgb, caption="Detection Result", use_container_width=True)
 
@@ -122,11 +152,11 @@ if page == "Live Detection":
 # Page: Registered Faces
 # ---------------------------------------------------------------------------
 elif page == "Registered Faces":
-    st.title("👥 Registered Faces")
+    st.title("Registered Faces")
     db = load_database()
 
     if not db:
-        st.warning("No faces registered yet. Go to **Add New Face** to register someone.")
+        st.warning("No faces registered yet. Go to 'Add New Face' to register someone.")
     else:
         for name, encs in db.items():
             with st.container(border=True):
@@ -141,10 +171,10 @@ elif page == "Registered Faces":
 # Page: Add New Face
 # ---------------------------------------------------------------------------
 elif page == "Add New Face":
-    st.title("➕ Add New Face")
+    st.title("Add New Face")
     name = st.text_input("Person's name")
 
-    tab1, tab2 = st.tabs(["📷 Capture from Webcam", "📁 Upload Images"])
+    tab1, tab2 = st.tabs(["Capture from Webcam", "Upload Images"])
 
     with tab1:
         img_file = st.camera_input("Take a photo")
@@ -153,16 +183,14 @@ elif page == "Add New Face":
                 st.warning("Please enter a name before registering.")
             elif st.button("Register this photo", key="register_webcam"):
                 image = Image.open(img_file)
-                image_np = np.array(image.convert("RGB"))
-                face_locations = face_recognition.face_locations(image_np)
+                feature = encode_uploaded_image(engine, image)
 
-                if not face_locations:
+                if feature is None:
                     st.error("No face detected in the photo. Please try again.")
                 else:
-                    encodings = face_recognition.face_encodings(image_np, face_locations)
                     db = load_database()
                     existing = db.get(name, [])
-                    db[name] = existing + [encodings[0]]
+                    db[name] = existing + [feature]
                     save_database(db)
                     st.success(f"'{name}' registered successfully!")
 
@@ -179,13 +207,11 @@ elif page == "Add New Face":
                 new_encodings = []
                 for file in uploaded_files:
                     image = Image.open(file)
-                    image_np = np.array(image.convert("RGB"))
-                    face_locations = face_recognition.face_locations(image_np)
-                    if not face_locations:
+                    feature = encode_uploaded_image(engine, image)
+                    if feature is None:
                         st.warning(f"No face found in {file.name}, skipped.")
                         continue
-                    encs = face_recognition.face_encodings(image_np, face_locations)
-                    new_encodings.append(encs[0])
+                    new_encodings.append(feature)
 
                 if new_encodings:
                     db = load_database()
@@ -201,7 +227,7 @@ elif page == "Add New Face":
 # Page: Delete Face
 # ---------------------------------------------------------------------------
 elif page == "Delete Face":
-    st.title("🗑️ Delete a Registered Face")
+    st.title("Delete a Registered Face")
     db = load_database()
     names = list(db.keys())
 
