@@ -1,6 +1,7 @@
 """
 face_db.py
 ----------
+
 Helper functions to load/save the registered-face encodings database.
 The database is stored as a pickle file at data/encodings.pkl, in the format:
 

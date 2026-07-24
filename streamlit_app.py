@@ -74,6 +74,7 @@ def annotate_frame(engine, img_bgr, known_names, known_encs):
     faces = engine.detect_faces(img_bgr)
     results = []
 
+
     for face_row in faces:
         x, y, w, h = face_row[0:4].astype(int)
         feature = engine.get_encoding(img_bgr, face_row)
